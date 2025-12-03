@@ -1,0 +1,5 @@
+{
+  "name": "SonicFlow AI",
+  "description": "A professional Text-to-Speech application powered by Gemini 2.5. Convert text to lifelike audio with granular control over playback speed and timeline navigation.",
+  "requestFramePermissions": []
+}
