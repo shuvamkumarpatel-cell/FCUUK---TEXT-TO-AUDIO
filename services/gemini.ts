@@ -3,18 +3,20 @@ import { VoiceName, Tone, MusicScore } from "../types";
 import { base64ToUint8Array, pcmToWav, synthesizeMusic } from "../utils/audio";
 
 const getToneInstruction = (tone: Tone, text: string): string => {
+  const persona = "Act as a world-class voice actor. Speak naturally with varied pitch and pacing, avoiding a robotic delivery.";
+  
   switch (tone) {
     case Tone.Happy:
-      return `Say cheerfully: ${text}`;
+      return `${persona} Read the following text with a cheerful, happy tone, full of positive energy:\n\n"${text}"`;
     case Tone.Angry:
-      return `Say in an angry tone: ${text}`;
+      return `${persona} Read the following text with an angry, frustrated tone, emphasizing the emotion:\n\n"${text}"`;
     case Tone.Sad:
-      return `Say in a sad, melancholic voice: ${text}`;
+      return `${persona} Read the following text with a sad, melancholic tone, softly and slowly:\n\n"${text}"`;
     case Tone.Scary:
-      return `Say in a spooky, scary voice: ${text}`;
+      return `${persona} Read the following text with a spooky, mysterious tone, building suspense:\n\n"${text}"`;
     case Tone.Normal:
     default:
-      return text;
+      return `${persona} Read the following text in a highly natural, conversational manner, as if talking to a friend:\n\n"${text}"`;
   }
 };
 
@@ -31,6 +33,7 @@ export const generateSpeech = async (text: string, voice: VoiceName, tone: Tone)
       model: "gemini-2.5-flash-preview-tts",
       contents: [{ parts: [{ text: prompt }] }],
       config: {
+        // systemInstruction is removed as it is not supported by the TTS model
         responseModalities: [Modality.AUDIO],
         speechConfig: {
           voiceConfig: {

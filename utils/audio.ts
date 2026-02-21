@@ -151,8 +151,59 @@ export const fetchAudioBuffer = async (url: string, context: BaseAudioContext): 
 };
 
 /**
+ * Performs a basic Overlap-Add time stretch to change speed without changing pitch.
+ * Note: This is a synchronous operation on PCM data.
+ */
+const timeStretch = (buffer: AudioBuffer, speed: number, context: BaseAudioContext): AudioBuffer => {
+  // If speed is 1.0, just return the original (cloned if needed, but here simple return)
+  if (Math.abs(speed - 1.0) < 0.01) return buffer;
+
+  const numChannels = buffer.numberOfChannels;
+  const inputLen = buffer.length;
+  // New length is inversely proportional to speed
+  const outputLen = Math.floor(inputLen / speed);
+  const sampleRate = buffer.sampleRate;
+
+  // Use the passed context to create buffer, avoids creating too many AudioContexts
+  const outputBuffer = context.createBuffer(numChannels, outputLen, sampleRate);
+
+  // Window size ~90ms at 44.1k
+  const windowSize = 4096; 
+  const overlap = windowSize / 2; // 50% overlap
+  
+  // Create Hanning window
+  const hanning = new Float32Array(windowSize);
+  for (let i = 0; i < windowSize; i++) {
+    hanning[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (windowSize - 1)));
+  }
+
+  for (let c = 0; c < numChannels; c++) {
+    const inputData = buffer.getChannelData(c);
+    const outputData = outputBuffer.getChannelData(c);
+
+    // OLA Algorithm
+    // Synthesis hop is fixed (overlap)
+    // Analysis hop scales with speed (overlap * speed)
+    
+    for (let outputOffset = 0; outputOffset < outputLen - windowSize; outputOffset += overlap) {
+        const inputOffset = Math.floor(outputOffset * speed);
+        
+        // Check boundaries
+        if (inputOffset + windowSize >= inputLen) break;
+
+        for (let i = 0; i < windowSize; i++) {
+            // Add windowed input grain to output
+            outputData[outputOffset + i] += inputData[inputOffset + i] * hanning[i];
+        }
+    }
+  }
+
+  return outputBuffer;
+};
+
+/**
  * Renders the final audio mix (speech + music) at the specific speed.
- * This physically resamples the audio to match the new duration.
+ * This physically resamples the audio to match the new duration while preserving pitch.
  */
 export const renderEnhancedAudio = async (
   speechUrl: string,
@@ -160,47 +211,60 @@ export const renderEnhancedAudio = async (
   speed: number,
   musicVolume: number
 ): Promise<Blob> => {
-  // Use a temporary context to decode
+  // Create one temporary context for decoding
   const tempCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
   
-  const speechBuffer = await fetchAudioBuffer(speechUrl, tempCtx);
-  let musicBuffer: AudioBuffer | null = null;
-  if (musicUrl) {
-    musicBuffer = await fetchAudioBuffer(musicUrl, tempCtx);
+  try {
+    const speechBuffer = await fetchAudioBuffer(speechUrl, tempCtx);
+    let musicBuffer: AudioBuffer | null = null;
+    if (musicUrl) {
+      musicBuffer = await fetchAudioBuffer(musicUrl, tempCtx);
+    }
+
+    // 1. Time-Stretch Speech to new duration (Preserves Pitch)
+    // We pass tempCtx to reuse it for buffer creation inside timeStretch
+    const stretchedSpeechBuffer = timeStretch(speechBuffer, speed, tempCtx);
+
+    const newDuration = stretchedSpeechBuffer.duration;
+    const sampleRate = 44100;
+
+    // 2. Mix using Offline Context
+    const offlineCtx = new OfflineAudioContext(2, newDuration * sampleRate, sampleRate);
+
+    // Speech Source
+    const speechSource = offlineCtx.createBufferSource();
+    speechSource.buffer = stretchedSpeechBuffer;
+    // Since we already manually stretched it to the correct length, we play it at 1.0 rate
+    speechSource.playbackRate.value = 1.0; 
+    speechSource.connect(offlineCtx.destination);
+    speechSource.start(0);
+
+    // Music Source (if exists)
+    if (musicBuffer) {
+      const musicSource = offlineCtx.createBufferSource();
+      const musicGain = offlineCtx.createGain();
+      
+      musicSource.buffer = musicBuffer;
+      musicSource.loop = true;
+      
+      // IMPORTANT: Do not pitch shift background music. 
+      // Keep it ambient at 1.0x speed, just loop it to fill the new duration.
+      musicSource.playbackRate.value = 1.0; 
+      
+      musicGain.gain.value = musicVolume;
+      
+      musicSource.connect(musicGain);
+      musicGain.connect(offlineCtx.destination);
+      musicSource.start(0);
+    }
+
+    // Render
+    const renderedBuffer = await offlineCtx.startRendering();
+    return audioBufferToWav(renderedBuffer);
+  } finally {
+    // Clean up context to release hardware resources
+    if (tempCtx.state !== 'closed' && 'close' in tempCtx) {
+       await (tempCtx as any).close();
+    }
   }
-
-  // Calculate new total duration based on speed
-  const originalDuration = speechBuffer.duration;
-  const newDuration = originalDuration / speed;
-  const sampleRate = 44100;
-
-  // Create Offline Context
-  const offlineCtx = new OfflineAudioContext(2, newDuration * sampleRate, sampleRate);
-
-  // 1. Setup Speech Source
-  const speechSource = offlineCtx.createBufferSource();
-  speechSource.buffer = speechBuffer;
-  speechSource.playbackRate.value = speed;
-  speechSource.connect(offlineCtx.destination);
-  speechSource.start(0);
-
-  // 2. Setup Music Source (if exists)
-  if (musicBuffer) {
-    const musicSource = offlineCtx.createBufferSource();
-    const musicGain = offlineCtx.createGain();
-    
-    musicSource.buffer = musicBuffer;
-    musicSource.loop = true;
-    musicSource.playbackRate.value = speed; // Sync pitch/speed with speech
-    
-    musicGain.gain.value = musicVolume;
-    
-    musicSource.connect(musicGain);
-    musicGain.connect(offlineCtx.destination);
-    musicSource.start(0);
-  }
-
-  // Render
-  const renderedBuffer = await offlineCtx.startRendering();
-  return audioBufferToWav(renderedBuffer);
 };
